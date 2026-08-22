@@ -1,0 +1,355 @@
+🚀 PART 1 — THE MASTER PROMPT (Paste First, Every Time)
+Markdown
+
+Role & Task:
+Act as a Principal Frontend Engineer and Motion Design Director who previously built interfaces at Apple's Human Interface team and Linear.app. Build the complete, production-grade React + TypeScript PWA template for "Tier 1: TAP Custom / Review Engine" — a single-page touchpoint interface that loads instantly when a customer taps an NFC card or scans a QR code.
+
+The bar is: it should feel like an Apple Wallet card, a Linear modal, and an iOS Control Center sheet had a baby. Buttery spring physics, zero layout jank, instant perceived load, and haptic-tight feedback loops on every single interaction.
+
+────────────────────────────────────
+1. STRICT DECOUPLED ARCHITECTURE
+────────────────────────────────────
+Nothing about design, copy, business identity, or animation feel may live inside components. Editing ONLY files in /src/config/ must be able to fully re-skin the app (colors, motion feel, copywriting, touchpoint priority) with ZERO changes to /src/components/, /src/hooks/, or /src/services/.
+
+/src
+├── /config
+│   ├── theme.config.ts        <-- Colors, radius, light/dark, typography scale
+│   ├── motion.config.ts       <-- Spring presets, stagger timing, easing curves, haptic patterns
+│   ├── client.config.ts       <-- Business metadata, activeMode, webhook URLs
+│   └── touchpoints.config.ts  <-- Vertical content: links, socials, WiFi creds, vCard fields, copy strings
+│
+├── /types
+│   └── template.types.ts
+│
+├── /services
+│   ├── api.service.ts         <-- n8n webhook POST handlers, retry-safe, optimistic UI
+│   └── haptics.service.ts     <-- navigator.vibrate abstraction, pattern presets from motion.config
+│
+├── /hooks
+│   ├── useTapAnalytics.ts     <-- Fires on mount + on every CTA tap, debounced, non-blocking
+│   ├── useSpringPress.ts      <-- Reusable "press-down" scale+shadow interaction hook
+│   └── useReducedMotion.ts    <-- Respects prefers-reduced-motion, disables spring overkill
+│
+├── /components
+│   ├── /ui                    <-- Shadcn primitives: Button, Drawer, Card, Badge, Dialog, Input, Skeleton
+│   ├── /layout                <-- AppShell, NFCContextBanner, FooterBrand, StatusBar-safe padding
+│   └── /touchpoints           <-- StarRating, ReviewRouter, FeedbackDrawer, WifiCard, VCardSheet, SocialHub
+│
+└── App.tsx                    <-- Root shell, AnimatePresence route/mode transitions, suspense boundary
+
+────────────────────────────────────
+2. THE MOTION SYSTEM (Apple-grade, non-negotiable)
+────────────────────────────────────
+Create /src/config/motion.config.ts as the single source of truth for ALL animation physics:
+
+export const motionConfig = {
+  springs: {
+    snappy:   { type: "spring", stiffness: 500, damping: 32, mass: 0.9 },  // buttons, taps
+    smooth:   { type: "spring", stiffness: 300, damping: 30, mass: 1 },     // card entrances
+    elastic:  { type: "spring", stiffness: 420, damping: 18, mass: 1 },     // star rating pop
+    drawer:   { type: "spring", stiffness: 380, damping: 38 },              // bottom sheets
+  },
+  stagger: { children: 0.045, delayChildren: 0.08 },
+  press: { scale: 0.96, brightness: 0.94 },
+  hover: { scale: 1.02 },
+  haptics: {
+    tap: 8,
+    selection: 12,
+    success: [10, 40, 10],
+    error: [20, 30, 20, 30],
+  },
+};
+
+Behavior rules to implement everywhere:
+- EVERY tappable element uses `whileTap={{ scale: motionConfig.press.scale }}` + haptics.service call on `onTapStart`.
+- Page/mode transitions use `AnimatePresence mode="wait"` with a 20px vertical slide + opacity fade (never a hard cut).
+- Lists (social hub links, feature buttons) stagger in using `staggerChildren` from motion.config — never all elements fading in at once.
+- Bottom drawers (Feedback, vCard, WiFi) use REAL drag-to-dismiss gesture via Framer Motion `drag="y"`, `dragConstraints`, and velocity-based `onDragEnd` snap logic — exactly like iOS sheets. Include a rubber-band overscroll resistance.
+- Star rating: each star does an elastic overshoot pop (`scale: [1, 1.35, 1]`) on select, cascades a tiny 40ms delay per adjacent star for a "ripple" feel.
+- Success/error states use a spring-in checkmark/x icon (Lucide `CheckCircle2` / `XCircle`) with a circular progress-ring wipe, not a plain toast.
+- Respect `useReducedMotion()` — swap springs for simple 150ms ease-out fades when true.
+- No animation exceeds 500ms total perceived duration. Nothing should ever feel like it's "waiting" on animation.
+
+────────────────────────────────────
+3. VISUAL DESIGN SYSTEM
+────────────────────────────────────
+- NO logo images/PNGs — 100% Lucide React icons for all branding marks, badges, and empty states.
+- Typography: Geist or Inter Variable, tight tracking (-0.01em to -0.02em) on headings, tabular-nums for any numeric ratings/counters.
+- Dark-first design (`defaultMode: "dark"`), true black-adjacent background (`hsl(224 71.4% 4.1%)`), never pure #000.
+- Glassmorphism panels: `backdrop-blur-xl bg-background/70 border border-white/10 shadow-[0_8px_30px_rgba(0,0,0,0.35)]`.
+- Radius scale from theme.config (default 0.75rem), consistently applied — cards, buttons, drawers all share the same radius token, never mismatched.
+- Safe-area padding (`env(safe-area-inset-bottom)`) on all fixed bottom elements (CTA bar, drawers).
+- Every primary CTA has a soft ambient glow using the accent color at 20% opacity blurred behind it (`shadow-[0_0_40px_var(--accent)/0.25]`) — this is the "premium" tell.
+- Skeleton loading shimmer (Shadcn Skeleton + custom gradient sweep animation) for the first 200-400ms while config loads — app must NEVER show a blank white/black flash.
+
+────────────────────────────────────
+4. TOUCHPOINT MODULES (render conditionally via client.config.activeMode)
+────────────────────────────────────
+MODULE A — Smart Review Router (REVIEW)
+- 5 interactive Lucide `Star` icons, elastic pop + haptic `selection` on tap.
+- Rating ≥ 4: Reveal (spring, staggered) a high-contrast CTA "Post on Google Maps" with `ExternalLink` icon → opens googleReviewUrl. Confetti-lite micro burst (6-8 particles, Lucide Sparkle icons, physics-based fall) on tap for delight.
+- Rating < 4: Smoothly morph star card into a bottom Drawer ("Tell us what went wrong — this goes straight to the owner, not public"). Textarea + submit button. On submit: optimistic success state (spring checkmark) THEN POST to n8nFeedbackWebhook via api.service. Payload: { rating, feedbackText, timestamp, touchpointId }.
+
+MODULE B — Instant WiFi Touchpoint (WIFI)
+- Glass card showing SSID + masked password with an eye-toggle reveal.
+- "Copy Password" button → clipboard API + haptic success pattern + inline checkmark morph (no toast spam).
+- Optional native WiFi QR payload generator button.
+
+MODULE C — Dynamic Contact / vCard (CONTACT)
+- Large "Save Contact" primary CTA (Lucide `UserPlus`) generating a downloadable .vcf blob client-side.
+- Secondary row: WhatsApp (`MessageCircle`) and Call (`Phone`) buttons, staggered in, each with distinct brand-tint glow.
+
+MODULE D — Multi-Link Social Hub (HUB)
+- Vertically staggered list of pill/card buttons pulled from touchpoints.config (label, icon, url, external boolean).
+- Each row: icon in a soft-tinted rounded square, label, chevron-right (`ChevronRight`) that nudges 2px on hover/press.
+
+────────────────────────────────────
+5. CONFIG FILE EXEMPLARS
+────────────────────────────────────
+/src/config/theme.config.ts
+export const themeConfig = {
+  primaryColor: "hsl(221.2 83.2% 53.3%)",
+  accentGlow: "hsl(221.2 83.2% 53.3% / 0.25)",
+  backgroundColor: "hsl(224 71.4% 4.1%)",
+  surfaceColor: "hsl(224 40% 8%)",
+  borderRadius: "0.75rem",
+  fontFamily: "'Geist', 'Inter', sans-serif",
+  enableGlassmorphism: true,
+  defaultMode: "dark" as const,
+};
+
+/src/config/client.config.ts
+export const clientConfig = {
+  businessName: "The Grand Bistro",
+  subtitle: "Pune | Touchpoint #01",
+  activeMode: "REVIEW" as "REVIEW" | "WIFI" | "CONTACT" | "HUB",
+  googleReviewUrl: "https://maps.google.com/?q=your_place_id",
+  n8nWebhookUrl: "https://n8n.yourdomain.com/webhook/tier1-analytics",
+  n8nFeedbackWebhook: "https://n8n.yourdomain.com/webhook/tier1-feedback",
+};
+
+/src/config/touchpoints.config.ts
+export const touchpointsConfig = {
+  vertical: "RESTAURANT",
+  icons: { primary: "Utensils", secondary: "Star" },
+  hub: [
+    { label: "Book a Table", icon: "MessageCircle", url: "https://wa.me/91XXXXXXXXXX", external: true },
+    { label: "View Menu", icon: "BookOpen", url: "/menu", external: false },
+  ],
+  wifi: { ssid: "Bistro_Guest", password: "welcome123" },
+  vcard: { name: "The Grand Bistro", phone: "+91XXXXXXXXXX", org: "Hospitality" },
+};
+
+────────────────────────────────────
+6. DELIVERABLES
+────────────────────────────────────
+- Full TypeScript source for every file in the tree above, no placeholders/TODOs left unresolved.
+- Every interaction wired to motion.config + haptics.service — no ad-hoc inline animation values in components.
+- Fully functional Shadcn primitives (Button, Drawer, Card, Badge, Dialog, Skeleton, Input, Textarea).
+- Inline comments explicitly stating: "Edit /src/config/X.ts to change Y — do not modify this file."
+- Lighthouse-friendly: lazy-load non-critical icons, no CLS, first paint under 1s on 4G.
+
+Build it now, file by file, starting with types → config → services → hooks → ui components → touchpoint components → App.tsx.
+🎯 PART 2 — VERTICAL INJECTION PROMPTS
+Paste ONE of these right after the master prompt output to skin it for that market. Each only edits client.config.ts, touchpoints.config.ts, and color tokens in theme.config.ts.
+
+1. 🍽️ Restaurants & Cafés
+Markdown
+
+Apply the RESTAURANT vertical preset to /src/config/*.
+
+theme.config.ts overrides:
+- primaryColor: "hsl(38 92% 50%)"   // Warm Amber
+- secondaryAccent: "hsl(160 84% 39%)" // Emerald
+- accentGlow: "hsl(38 92% 50% / 0.25)"
+
+client.config.ts:
+- activeMode: "REVIEW" (default landing), with HUB as secondary swipeable panel
+- subtitle copy tone: warm, hospitality-driven ("Thanks for dining with us today")
+
+touchpoints.config.ts:
+- vertical: "RESTAURANT"
+- Primary icons: Utensils (brand mark), Star (review), Wifi (table wifi), MessageSquare (reservations)
+- hub items: "Reserve a Table" (WhatsApp, MessageSquare), "View Digital Menu" (BookOpen, internal link), "Connect to WiFi" (Wifi, opens WifiCard), "Leave a Review" (Star, ReviewRouter)
+- Include a subtle food-motion detail: on load, animate the Utensils icon with a gentle 6deg rotate-settle spring — feels like a menu "opening."
+- Empty/loading state copy: "Setting your table..."
+2. 💇 Salons & Barbers
+Markdown
+
+Apply the SALON vertical preset to /src/config/*.
+
+theme.config.ts overrides:
+- primaryColor: "hsl(347 77% 60%)"   // Rose
+- secondaryAccent: "hsl(45 65% 52%)" // Gold
+- accentGlow: "hsl(347 77% 60% / 0.25)"
+
+client.config.ts:
+- activeMode: "HUB" as landing, ReviewRouter accessible via secondary CTA
+- subtitle tone: confident, stylish, personal ("Your look, booked in seconds")
+
+touchpoints.config.ts:
+- vertical: "SALON"
+- Primary icons: Scissors (brand mark), Sparkles (services), Calendar (booking), Instagram (portfolio)
+- hub items: "Book an Appointment" (Calendar, WhatsApp deep link), "View Our Work" (Instagram, external), "Service & Price List" (Sparkles, internal), "Leave a Review" (Star, ReviewRouter)
+- Micro-interaction: Scissors icon does a tiny "snip" animation (two-path rotate) once on mount, then settles — playful, one-time only, not looping.
+- Empty/loading copy: "Styling your experience..."
+3. 🦷 Clinics & Dentists
+Markdown
+
+Apply the CLINIC vertical preset to /src/config/*.
+
+theme.config.ts overrides:
+- primaryColor: "hsl(199 89% 48%)"   // Medical Blue
+- secondaryAccent: "hsl(173 80% 40%)" // Teal
+- accentGlow: "hsl(199 89% 48% / 0.20)" // more restrained glow — clinical, not flashy
+
+client.config.ts:
+- activeMode: "REVIEW", with feedback drawer prioritized for <4 stars — this vertical MUST route negative sentiment privately first, before ever surfacing anything public.
+- subtitle tone: calm, reassuring, precise ("How was your visit today?")
+
+touchpoints.config.ts:
+- vertical: "CLINIC"
+- Primary icons: Stethoscope (brand mark), Clock (doctor timings), Phone (appointment line), ShieldCheck (trust badge)
+- hub items: "Doctor Timings" (Clock, internal display card), "Book Appointment" (Phone, tel: link), "Emergency Contact" (PhoneCall, high-contrast red-tinted button, always visible pinned at bottom), "Share Feedback" (Star, ReviewRouter)
+- Motion should be calmer here: reduce spring bounce/overshoot by ~30% vs default (use motionConfig.springs.smooth instead of elastic) — clinical trust > playful bounce.
+- Empty/loading copy: "Loading clinic information..."
+4. 🏋️ Gyms & Fitness Studios
+Markdown
+
+Apply the GYM vertical preset to /src/config/*.
+
+theme.config.ts overrides:
+- primaryColor: "hsl(0 84% 60%)"     // Electric Red
+- secondaryAccent: "hsl(84 81% 54%)" // Neon Lime
+- accentGlow: "hsl(0 84% 60% / 0.30)" // bold, high-energy glow
+
+client.config.ts:
+- activeMode: "HUB" as landing, high-energy CTA hierarchy (Trial Pass > Schedule > Review)
+- subtitle tone: high energy, motivational ("Let's get moving 💪")
+
+touchpoints.config.ts:
+- vertical: "GYM"
+- Primary icons: Dumbbell (brand mark), Flame (streak/energy), Calendar (class schedule), Trophy (community/results)
+- hub items: "Claim Free Trial Pass" (Flame, WhatsApp/form link, pulsing glow loop to draw attention), "Class Schedule" (Calendar, internal), "Join Our Community" (Instagram), "Leave a Review" (Star, ReviewRouter)
+- Motion should be MORE energetic: increase press scale delta (0.93 instead of 0.96), add a subtle continuous pulse glow animation on the primary Trial CTA (2s loop, opacity 0.6→1).
+- Empty/loading copy: "Warming up..."
+5. 🏨 Hotels & Hospitality
+Markdown
+
+Apply the HOTEL vertical preset to /src/config/*.
+
+theme.config.ts overrides:
+- primaryColor: "hsl(224 64% 33%)"   // Royal Navy
+- secondaryAccent: "hsl(45 65% 52%)" // Gold
+- accentGlow: "hsl(45 65% 52% / 0.20)" // gold glow, understated luxury
+
+client.config.ts:
+- activeMode: "HUB" as landing (guest-services focused, not review-first)
+- subtitle tone: refined, concierge-like ("Welcome back. How can we assist?")
+
+touchpoints.config.ts:
+- vertical: "HOTEL"
+- Primary icons: Hotel (brand mark), Wifi (room connect), ConciergeBell (housekeeping/reception), MapPin (local guide)
+- hub items: "Connect to Room WiFi" (Wifi, opens WifiCard), "Request Housekeeping" (ConciergeBell, WhatsApp with pre-filled room number field), "Local Attractions Guide" (MapPin, internal link), "Share Your Experience" (Star, ReviewRouter)
+- Use serif-leaning display weight for businessName only (keep body Geist/Inter) to convey "luxury hospitality" feel — controlled via a `displayFontOverride` field in theme.config.
+- Empty/loading copy: "Preparing your stay..."
+6. 🏠 Real Estate
+Markdown
+
+Apply the REAL_ESTATE vertical preset to /src/config/*.
+
+theme.config.ts overrides:
+- primaryColor: "hsl(215 16% 35%)"   // Slate Grey
+- secondaryAccent: "hsl(29 58% 43%)" // Copper
+- accentGlow: "hsl(29 58% 43% / 0.22)"
+
+client.config.ts:
+- activeMode: "HUB" as landing
+- subtitle tone: professional, trust-building ("Your next property, one tap away")
+
+touchpoints.config.ts:
+- vertical: "REAL_ESTATE"
+- Primary icons: Building (brand mark), Video (tour), FileText (brochure), Phone (agent)
+- hub items: "Download Brochure" (FileText, triggers file download with a progress-ring micro-interaction), "Watch Video Tour" (Video, opens external/embedded player), "Chat with Agent" (MessageCircle, WhatsApp), "Request a Viewing" (Calendar, opens form drawer with Name/Date/Time fields, POSTs to webhook)
+- Card elements should feel more "editorial" — slightly larger imagery placeholders, more whitespace, less glow/neon than gym/salon presets.
+- Empty/loading copy: "Loading property details..."
+7. 🛍️ Retail Stores
+Markdown
+
+Apply the RETAIL vertical preset to /src/config/*.
+
+theme.config.ts overrides:
+- primaryColor: "hsl(243 75% 59%)"   // Indigo
+- secondaryAccent: "hsl(292 84% 61%)" // Magenta
+- accentGlow: "hsl(243 75% 59% / 0.28)"
+
+client.config.ts:
+- activeMode: "HUB" as landing
+- subtitle tone: trendy, punchy ("New drops. Better deals. Tap in.")
+
+touchpoints.config.ts:
+- vertical: "RETAIL"
+- Primary icons: ShoppingBag (brand mark), Tag (loyalty), Percent (offers), Star (reviews)
+- hub items: "Join Loyalty Program" (Tag, form drawer capturing phone number), "Today's Offers" (Percent, internal card with a small "live" pulsing dot badge), "Shop on Instagram" (Instagram, external), "Rate Your Visit" (Star, ReviewRouter)
+- Add a "NEW" or "% OFF" Lucide Badge component with a subtle shimmer sweep animation on the Offers hub item to drive attention — this is the one vertical where a persistent subtle shimmer is appropriate.
+- Empty/loading copy: "Fetching today's deals..."
+8. 🔧 Automotive & Garages
+Markdown
+
+Apply the AUTOMOTIVE vertical preset to /src/config/*.
+
+theme.config.ts overrides:
+- primaryColor: "hsl(25 95% 53%)"    // Industrial Orange
+- secondaryAccent: "hsl(215 25% 17%)" // Dark Charcoal
+- accentGlow: "hsl(25 95% 53% / 0.25)"
+
+client.config.ts:
+- activeMode: "HUB" as landing
+- subtitle tone: reliable, no-nonsense ("Book your service in 30 seconds")
+
+touchpoints.config.ts:
+- vertical: "AUTOMOTIVE"
+- Primary icons: Wrench (brand mark), Shield (roadside/warranty), PhoneCall (emergency), Star (reviews)
+- hub items: "Book Service Appointment" (Wrench, form/WhatsApp), "24/7 Roadside Assistance" (PhoneCall, tel: link, pinned bottom bar with red-tinted urgent styling, always visible regardless of scroll), "Service Price List" (FileText, internal), "Leave a Review" (Star, ReviewRouter)
+- Use heavier font-weight (600-700) throughout for a "rugged/industrial" feel vs the lighter weights used in salon/hotel presets. Sharper corners: override borderRadius to 0.5rem for this vertical only.
+- Empty/loading copy: "Checking service bay..."
+9. 🎓 Coaching & Education
+Markdown
+
+Apply the EDUCATION vertical preset to /src/config/*.
+
+theme.config.ts overrides:
+- primaryColor: "hsl(217 91% 40%)"   // Sapphire Blue
+- secondaryAccent: "hsl(262 83% 58%)" // Violet
+- accentGlow: "hsl(262 83% 58% / 0.25)"
+
+client.config.ts:
+- activeMode: "HUB" as landing
+- subtitle tone: aspirational, encouraging ("Your next chapter starts here")
+
+touchpoints.config.ts:
+- vertical: "EDUCATION"
+- Primary icons: GraduationCap (brand mark), BookOpen (syllabus), Send (enrollment), Users (counselor)
+- hub items: "Download Syllabus" (BookOpen, file download with progress micro-interaction), "Enroll Now" (Send, form drawer: Name, Phone, Course Interest dropdown, POST to webhook), "Talk to Admissions Counselor" (MessageCircle, WhatsApp), "Read Student Reviews" (Star, ReviewRouter)
+- Use a gradient text treatment (Sapphire→Violet) on the businessName only, static (no animation) — signals "premium learning brand" without being loud.
+- Empty/loading copy: "Loading your course info..."
+10. 💍 Events & Weddings
+Markdown
+
+Apply the EVENTS vertical preset to /src/config/*.
+
+theme.config.ts overrides:
+- primaryColor: "hsl(45 65% 52%)"    // Champagne Gold
+- secondaryAccent: "hsl(2 65% 85%)"  // Rose Quartz
+- accentGlow: "hsl(45 65% 52% / 0.22)"
+
+client.config.ts:
+- activeMode: "HUB" as landing
+- subtitle tone: elegant, celebratory ("Join us in celebration ✨")
+
+touchpoints.config.ts:
+- vertical: "EVENTS"
+- Primary icons: Calendar (schedule), MapPin (venue), CheckCircle (RSVP), Camera (gallery)
+- hub items: "Event Schedule" (Calendar, internal timeline card with staggered agenda items), "Venue Directions" (MapPin, opens Google Maps), "RSVP Now" (CheckCircle, form drawer: Name, Guests count, Attending Y/N toggle, POST to webhook, ends with a confetti burst on submit), "Photo Gallery" (Camera, external link)
+- This is the ONE vertical where the confetti/celebration micro-interaction (Lucide Sparkle particles + spring checkmark) should be MORE elaborate on RSVP success — 12-16 particles, longer 900ms settle, since it's a celebratory action, not a transactional one.
+- Empty/loading copy: "Loading the celebration details..."
